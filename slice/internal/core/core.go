@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"tpu-slice-controller/api/v1beta1"
 )
@@ -47,6 +48,16 @@ func IsValidTPUAccelerator(tpuAccelerator string) bool {
 func IsRelevantPodTemplateSpec(spec corev1.PodTemplateSpec) bool {
 	return IsValidTPUTopology(GetTPUTopology(spec)) &&
 		IsValidTPUAccelerator(GetTPUAccelerator(spec))
+}
+
+func HasRelevantPodSet(podSets []kueue.PodSet) bool {
+	// At least one PodSet should be relevant.
+	for _, ps := range podSets {
+		if IsRelevantPodTemplateSpec(ps.Template) {
+			return true
+		}
+	}
+	return false
 }
 
 func GetTPUTopology(spec corev1.PodTemplateSpec) string {
@@ -99,4 +110,14 @@ func GetSliceState(slice v1beta1.Slice, timeout time.Duration) SliceState {
 		return SliceStateCreated
 	}
 	return SliceStateActivating
+}
+
+// GroupSlicesByState groups a list of Slices by their current state.
+func GroupSlicesByState(slices []v1beta1.Slice, timeout time.Duration) map[SliceState][]*v1beta1.Slice {
+	slicesByState := make(map[SliceState][]*v1beta1.Slice)
+	for i := range slices {
+		state := GetSliceState(slices[i], timeout)
+		slicesByState[state] = append(slicesByState[state], &slices[i])
+	}
+	return slicesByState
 }

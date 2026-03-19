@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,6 +51,23 @@ func SliceWithMetadata(wl *kueue.Workload, podSetName kueue.PodSetReference, sli
 	}
 }
 
+// ConstructSliceForWorkload creates a Slice based on the Workload and PodSet constraints.
+// Since Slice is a cluster-scoped object and Workload is namespaced,
+// we cannot set a controller owner reference. The Workload's namespace and name
+// are stored as annotations on the Slice for lookup.
+func ConstructSliceForWorkload(wl *kueue.Workload, podSetName kueue.PodSetReference, sliceIndex int32, template corev1.PodTemplateSpec, partitionIDs []string) *v1beta1.Slice {
+	slice := SliceWithMetadata(wl, podSetName, sliceIndex)
+	if features.Enabled(features.UseRetryMechanismForSliceCreation) {
+		slice.Annotations[RetryOnFailureAnnotation] = "true"
+	}
+	slice.Spec.Type = v1beta1.Type(GetTPUAccelerator(template))
+	if len(partitionIDs) > 0 {
+		slice.Spec.PartitionIds = partitionIDs
+	}
+	slice.Spec.Topology = GetTPUTopology(template)
+	return slice
+}
+
 func SliceName(ns string, workloadName string, podSetName kueue.PodSetReference, sliceIndex int32) string {
 	name := fmt.Sprintf("%s-%s-%s-%d", ns, workloadName, podSetName, sliceIndex)
 	if len(name) <= maxSliceNameLength {
@@ -76,4 +94,30 @@ func isError(slice *v1beta1.Slice) bool {
 		return false
 	}
 	return condReady.Reason == string(MMIGHealthStatusFailed) || (!features.Enabled(features.UseRetryMechanismForSliceCreation) && condReady.Reason == string(SliceCreationFailed))
+}
+
+func ApplySliceChanges(existingSlices []v1beta1.Slice, createdSlices []v1beta1.Slice, deletedSliceNames []string) ([]v1beta1.Slice, bool) {
+	changed := len(deletedSliceNames) > 0 || len(createdSlices) > 0
+	if !changed {
+		return existingSlices, false
+	}
+
+	updatedSlices := make([]v1beta1.Slice, 0, len(existingSlices)-len(deletedSliceNames)+len(createdSlices))
+
+	if len(deletedSliceNames) > 0 {
+		deletedSet := make(map[string]bool, len(deletedSliceNames))
+		for _, name := range deletedSliceNames {
+			deletedSet[name] = true
+		}
+		for i := range existingSlices {
+			if !deletedSet[existingSlices[i].Name] {
+				updatedSlices = append(updatedSlices, existingSlices[i])
+			}
+		}
+	} else {
+		updatedSlices = append(updatedSlices, existingSlices...)
+	}
+
+	updatedSlices = append(updatedSlices, createdSlices...)
+	return updatedSlices, true
 }
